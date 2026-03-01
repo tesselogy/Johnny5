@@ -13,3 +13,7 @@ PG_PORT = 5432
 PG_DB = "johnny5"
 PG_USER = "dmitriysarychev"
 PG_PASSWORD = "postgres"
+
+# L2 pose classification
+POSE_PROTOTYPES_PATH = "pose_prototypes.json"
+POSE_MIN_VISIBLE_KEYPOINTS = 6
