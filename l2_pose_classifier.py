@@ -10,36 +10,33 @@ Point = Optional[Tuple[int, int]]
 class PoseClassifier:
     """
     L2 yoga pose classifier with two modes:
-    1) Prototype mode: nearest prototype loaded from JSON (recommended for Roboflow dataset).
+    1) Prototype mode: nearest angle-prototype loaded from JSON (recommended for Roboflow dataset).
     2) Fallback mode: map L1 heuristic asana labels.
 
     Expected JSON format:
     {
-      "tree_pose": {"nose": [0.51, 0.13], "left_shoulder": [0.44, 0.29], ...},
+      "tree_pose": {
+        "left_elbow": 168.5,
+        "right_elbow": 172.0,
+        "left_knee": 48.2,
+        "right_knee": 177.1
+      },
       "warrior_2": {...}
     }
-    Coordinates must be normalized to [0, 1] in person-centric crop space.
+
+    Angles are in degrees [0..180].
     """
 
-    KEYPOINT_ORDER = [
-        "nose",
-        "left_eye",
-        "right_eye",
-        "left_ear",
-        "right_ear",
-        "left_shoulder",
-        "right_shoulder",
-        "left_elbow",
-        "right_elbow",
-        "left_wrist",
-        "right_wrist",
-        "left_hip",
-        "right_hip",
-        "left_knee",
-        "right_knee",
-        "left_ankle",
-        "right_ankle",
-    ]
+    ANGLE_TRIPLETS = {
+        "left_elbow": ("left_shoulder", "left_elbow", "left_wrist"),
+        "right_elbow": ("right_shoulder", "right_elbow", "right_wrist"),
+        "left_shoulder": ("left_elbow", "left_shoulder", "left_hip"),
+        "right_shoulder": ("right_elbow", "right_shoulder", "right_hip"),
+        "left_hip": ("left_shoulder", "left_hip", "left_knee"),
+        "right_hip": ("right_shoulder", "right_hip", "right_knee"),
+        "left_knee": ("left_hip", "left_knee", "left_ankle"),
+        "right_knee": ("right_hip", "right_knee", "right_ankle"),
+    }
 
     FALLBACK_MAP = {
         "mountain": "mountain_pose",
@@ -54,71 +51,88 @@ class PoseClassifier:
         self.min_visible_keypoints = min_visible_keypoints
         self.prototypes = self._load_prototypes(prototypes_path)
 
-    def _load_prototypes(self, path: str) -> Dict[str, Dict[str, Tuple[float, float]]]:
+    def _load_prototypes(self, path: str) -> Dict[str, Dict[str, float]]:
         if not path or not os.path.exists(path):
             return {}
 
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
 
-        parsed = {}
-        for label, point_map in raw.items():
+        parsed: Dict[str, Dict[str, float]] = {}
+        for label, angle_map in raw.items():
             parsed[label] = {}
-            for k in self.KEYPOINT_ORDER:
-                if k in point_map and point_map[k] is not None:
-                    x, y = point_map[k]
-                    parsed[label][k] = (float(x), float(y))
+            for angle_name in self.ANGLE_TRIPLETS:
+                value = angle_map.get(angle_name)
+                if value is None:
+                    continue
+                parsed[label][angle_name] = float(value)
         return parsed
 
-    def _normalize_body_parts(self, body_parts: Dict[str, Point]) -> Dict[str, Tuple[float, float]]:
-        pts = [(p[0], p[1]) for p in body_parts.values() if p is not None]
-        if len(pts) < self.min_visible_keypoints:
-            return {}
+    def _visible_points_count(self, body_parts: Dict[str, Point]) -> int:
+        return sum(1 for p in body_parts.values() if p is not None)
 
-        xs = [x for x, _ in pts]
-        ys = [y for _, y in pts]
-        min_x, max_x = min(xs), max(xs)
-        min_y, max_y = min(ys), max(ys)
+    def _joint_angle(self, a: Point, b: Point, c: Point) -> Optional[float]:
+        if a is None or b is None or c is None:
+            return None
 
-        w = max(1.0, float(max_x - min_x))
-        h = max(1.0, float(max_y - min_y))
+        bax = float(a[0] - b[0])
+        bay = float(a[1] - b[1])
+        bcx = float(c[0] - b[0])
+        bcy = float(c[1] - b[1])
 
-        norm = {}
-        for k in self.KEYPOINT_ORDER:
-            p = body_parts.get(k)
-            if p is None:
-                continue
-            norm[k] = ((p[0] - min_x) / w, (p[1] - min_y) / h)
-        return norm
+        norm_ba = math.hypot(bax, bay)
+        norm_bc = math.hypot(bcx, bcy)
+        if norm_ba < 1e-6 or norm_bc < 1e-6:
+            return None
 
-    def _prototype_distance(self, norm_points: Dict[str, Tuple[float, float]], prototype: Dict[str, Tuple[float, float]]) -> float:
-        common = [k for k in self.KEYPOINT_ORDER if k in norm_points and k in prototype]
-        if len(common) < self.min_visible_keypoints:
+        cos_theta = (bax * bcx + bay * bcy) / (norm_ba * norm_bc)
+        cos_theta = max(-1.0, min(1.0, cos_theta))
+        theta = math.degrees(math.acos(cos_theta))
+        return theta
+
+    def _extract_angles(self, body_parts: Dict[str, Point]) -> Dict[str, float]:
+        out: Dict[str, float] = {}
+        for angle_name, (a_name, b_name, c_name) in self.ANGLE_TRIPLETS.items():
+            angle = self._joint_angle(
+                body_parts.get(a_name),
+                body_parts.get(b_name),
+                body_parts.get(c_name),
+            )
+            if angle is not None:
+                out[angle_name] = angle
+        return out
+
+    def _angle_distance(self, observed: Dict[str, float], prototype: Dict[str, float]) -> float:
+        common = [k for k in self.ANGLE_TRIPLETS if k in observed and k in prototype]
+        if len(common) < 3:
             return float("inf")
 
         s = 0.0
         for k in common:
-            dx = norm_points[k][0] - prototype[k][0]
-            dy = norm_points[k][1] - prototype[k][1]
-            s += dx * dx + dy * dy
+            diff = abs(observed[k] - prototype[k])
+            diff = min(diff, 360.0 - diff)
+            s += (diff / 180.0) ** 2
         return math.sqrt(s / len(common))
 
     def classify(self, body_parts: Dict[str, Point], heuristic_asana: str) -> Tuple[str, float, str]:
-        norm_points = self._normalize_body_parts(body_parts)
+        if self._visible_points_count(body_parts) >= self.min_visible_keypoints:
+            observed_angles = self._extract_angles(body_parts)
+        else:
+            observed_angles = {}
 
-        if self.prototypes and norm_points:
+        if self.prototypes and observed_angles:
             best_label = "unknown"
             best_dist = float("inf")
 
             for label, prototype in self.prototypes.items():
-                dist = self._prototype_distance(norm_points, prototype)
+                dist = self._angle_distance(observed_angles, prototype)
                 if dist < best_dist:
                     best_dist = dist
                     best_label = label
 
             if math.isfinite(best_dist):
                 confidence = max(0.0, min(1.0, 1.0 - best_dist))
-                return best_label, confidence, "prototype"
+                return best_label, confidence, "prototype_angles"
 
         fallback = self.FALLBACK_MAP.get(heuristic_asana, "unknown")
         confidence = 0.45 if fallback != "unknown" else 0.2
