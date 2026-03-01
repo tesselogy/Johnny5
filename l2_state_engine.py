@@ -13,6 +13,7 @@ class SceneEngine:
             prototypes_path=POSE_PROTOTYPES_PATH,
             min_visible_keypoints=POSE_MIN_VISIBLE_KEYPOINTS,
         )
+        self.l2_pose_log_memory = {}
 
     def update(self, identity_results):
 
@@ -32,6 +33,28 @@ class SceneEngine:
                 match.body_parts,
                 match.asana,
             )
+
+            prev_l2 = self.l2_pose_log_memory.get(track_id)
+            curr_l2 = {
+                "pose_label": pose_label,
+                "pose_source": pose_source,
+            }
+            if prev_l2 is None:
+                print(
+                    f"[PoseDebugL2:init] track={track_id} person={match.person_id} "
+                    f"pose_label={pose_label} confidence={pose_confidence:.2f} source={pose_source}"
+                )
+            elif (
+                prev_l2.get("pose_label") != pose_label
+                or prev_l2.get("pose_source") != pose_source
+            ):
+                print(
+                    f"[PoseDebugL2:change] track={track_id} person={match.person_id} "
+                    f"pose_label:{prev_l2.get('pose_label')}->{pose_label} "
+                    f"source:{prev_l2.get('pose_source')}->{pose_source} "
+                    f"confidence={pose_confidence:.2f}"
+                )
+            self.l2_pose_log_memory[track_id] = curr_l2
 
             if person_key not in self.scene.participants:
                 self.scene.participants[person_key] = ParticipantState(
@@ -66,5 +89,10 @@ class SceneEngine:
             if key not in active_keys:
                 if participant.last_seen + GRACE_PERIOD_SEC < now:
                     del self.scene.participants[key]
+
+        active_track_ids = {track_id for track_id, _ in identity_results}
+        for track_id in list(self.l2_pose_log_memory.keys()):
+            if track_id not in active_track_ids:
+                del self.l2_pose_log_memory[track_id]
 
         self.scene.timestamp = now

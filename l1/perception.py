@@ -94,19 +94,20 @@ class Perception:
         if prev is None:
             self.debug_state_memory[track_id] = current
             print(
-                f"[PoseDebug:init] track={track_id} person={person_id} "
-                f"position={person_position} pose={pose_state} eyes={eyes_state} asana={asana}"
+                f"[PoseDebugL1:init] track={track_id} person={person_id} "
+                f"position={person_position} pose={pose_state} eyes={eyes_state} asana_l1={asana}"
             )
             return
 
         changed = []
         for key in ("position", "pose", "eyes", "asana"):
             if prev.get(key) != current[key]:
-                changed.append(f"{key}:{prev.get(key)}->{current[key]}")
+                field_name = "asana_l1" if key == "asana" else key
+                changed.append(f"{field_name}:{prev.get(key)}->{current[key]}")
 
         if changed:
             print(
-                f"[PoseDebug:change] track={track_id} person={person_id} "
+                f"[PoseDebugL1:change] track={track_id} person={person_id} "
                 + " | ".join(changed)
             )
 
