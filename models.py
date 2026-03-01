@@ -12,6 +12,9 @@ class IdentityMatch:
     eyes_state: str = "not_visible"
     asana: str = "unknown"
     body_parts: Dict[str, Optional[Tuple[int, int]]] = field(default_factory=dict)
+    pose_label: str = "unknown"
+    pose_confidence: float = 0.0
+    pose_source: str = "none"
 
 
 @dataclass
@@ -26,6 +29,9 @@ class ParticipantState:
     eyes_state: str = "not_visible"
     asana: str = "unknown"
     body_parts: Dict[str, Optional[Tuple[int, int]]] = field(default_factory=dict)
+    pose_label: str = "unknown"
+    pose_confidence: float = 0.0
+    pose_source: str = "none"
     revision: int = 0
 
 
