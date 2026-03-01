@@ -4,7 +4,6 @@ import cv2
 import uuid
 import time
 import numpy as np
-from typing import Dict, Optional, Tuple
 
 from l1.detector import PersonDetector
 from l1.face_encoder import FaceEncoder
@@ -69,6 +68,9 @@ class Perception:
         # person_id -> timestamp of last profile vector append
         self.profile_update_ts = {}
 
+        # track_id -> last emitted debug posture state
+        self.debug_state_memory = {}
+
         # load stored embeddings
         existing = self.store.load_all()
         for person_id, embedding in existing:
@@ -79,6 +81,36 @@ class Perception:
         )
 
         print(f"[IdentityStore] Loaded {len(existing)} persons")
+
+    def _log_state_changes(self, track_id, person_id, person_position, pose_state, eyes_state, asana):
+        prev = self.debug_state_memory.get(track_id)
+        current = {
+            "position": person_position,
+            "pose": pose_state,
+            "eyes": eyes_state,
+            "asana": asana,
+        }
+
+        if prev is None:
+            self.debug_state_memory[track_id] = current
+            print(
+                f"[PoseDebug:init] track={track_id} person={person_id} "
+                f"position={person_position} pose={pose_state} eyes={eyes_state} asana={asana}"
+            )
+            return
+
+        changed = []
+        for key in ("position", "pose", "eyes", "asana"):
+            if prev.get(key) != current[key]:
+                changed.append(f"{key}:{prev.get(key)}->{current[key]}")
+
+        if changed:
+            print(
+                f"[PoseDebug:change] track={track_id} person={person_id} "
+                + " | ".join(changed)
+            )
+
+        self.debug_state_memory[track_id] = current
 
 
     def _estimate_person_position(self, frame_shape, bbox):
@@ -206,12 +238,31 @@ class Perception:
         label = f"{track_id} | {person_id} | sim:{similarity:.2f}"
         debug_line = f"{person_position} | pose:{pose_state} | eyes:{eyes_state} | asana:{asana}"
 
+        text_size_1, _ = cv2.getTextSize(
+            label,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            2,
+        )
+        text_size_2, _ = cv2.getTextSize(
+            debug_line,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            2,
+        )
+
+        bg_width = max(text_size_1[0], text_size_2[0]) + 12
+        bg_height = text_size_1[1] + text_size_2[1] + 18
+        bg_tl = (x1, max(0, y1 - bg_height - 4))
+        bg_br = (x1 + bg_width, max(0, y1 - 4))
+        cv2.rectangle(frame, bg_tl, bg_br, (0, 0, 0), -1)
+
         cv2.putText(
             frame,
             label,
-            (x1, max(20, y1 - 26)),
+            (x1 + 6, max(20, y1 - 28)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
+            0.6,
             color,
             2
         )
@@ -219,11 +270,11 @@ class Perception:
         cv2.putText(
             frame,
             debug_line,
-            (x1, max(40, y1 - 8)),
+            (x1 + 6, max(42, y1 - 8)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
+            0.55,
             color,
-            1
+            2
         )
 
     # -------------------------------------------------
@@ -245,6 +296,15 @@ class Perception:
             person_position = self._estimate_person_position(frame.shape, (x1, y1, x2, y2))
             pose_state, asana = self._classify_pose_and_asana(body_parts)
             eyes_state = self._classify_eyes(frame, (x1, y1, x2, y2), body_parts)
+
+            self._log_state_changes(
+                track_id,
+                self.identity_memory.get(track_id),
+                person_position,
+                pose_state,
+                eyes_state,
+                asana,
+            )
 
             embedding, quality = self.encoder.extract(
                 frame,
@@ -405,6 +465,10 @@ class Perception:
             if track_id not in active_track_ids:
                 if now - self.track_state[track_id]["last_seen"] > TRACK_STALE_SEC:
                     del self.track_state[track_id]
+
+        for track_id in list(self.debug_state_memory.keys()):
+            if track_id not in active_track_ids:
+                del self.debug_state_memory[track_id]
 
         cv2.imshow("Johnny5 Vision", frame)
         cv2.waitKey(1)
