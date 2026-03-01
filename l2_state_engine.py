@@ -1,7 +1,13 @@
 
 import time
 from models import ParticipantState, SceneState
-from config import GRACE_PERIOD_SEC, POSE_MIN_VISIBLE_KEYPOINTS, POSE_PROTOTYPES_PATH
+from config import (
+    GRACE_PERIOD_SEC,
+    POSE_MIN_VISIBLE_KEYPOINTS,
+    POSE_PROTOTYPES_PATH,
+    POSE_DISTANCE_EMA_ALPHA,
+    POSE_SWITCH_MARGIN,
+)
 from l2_pose_classifier import PoseClassifier
 
 
@@ -14,6 +20,7 @@ class SceneEngine:
             min_visible_keypoints=POSE_MIN_VISIBLE_KEYPOINTS,
         )
         self.l2_pose_log_memory = {}
+        self.pose_ema_memory = {}
 
     def update(self, identity_results):
 
@@ -29,10 +36,53 @@ class SceneEngine:
 
             active_keys.add(person_key)
 
-            pose_label, pose_confidence, pose_source = self.pose_classifier.classify(
-                match.body_parts,
-                match.asana,
-            )
+            distances = self.pose_classifier.distance_map(match.body_parts)
+
+            pose_label = "unknown"
+            pose_confidence = 0.0
+            pose_source = "prototype_angles_mirror_ema"
+
+            if distances:
+                state = self.pose_ema_memory.get(track_id, {"ema": {}, "label": None})
+                ema = state["ema"]
+
+                # update EMA for seen labels
+                for label, dist in distances.items():
+                    if label in ema:
+                        ema[label] = (
+                            POSE_DISTANCE_EMA_ALPHA * dist
+                            + (1.0 - POSE_DISTANCE_EMA_ALPHA) * ema[label]
+                        )
+                    else:
+                        ema[label] = dist
+
+                # soft decay for labels not seen in current frame
+                for label in list(ema.keys()):
+                    if label not in distances:
+                        ema[label] = min(1.0, ema[label] + 0.03)
+
+                candidate_label, candidate_dist = min(ema.items(), key=lambda x: x[1])
+                prev_label = state.get("label")
+
+                if prev_label in ema:
+                    prev_dist = ema[prev_label]
+                    if candidate_label != prev_label and candidate_dist > prev_dist - POSE_SWITCH_MARGIN:
+                        pose_label = prev_label
+                    else:
+                        pose_label = candidate_label
+                else:
+                    pose_label = candidate_label
+
+                state["label"] = pose_label
+                self.pose_ema_memory[track_id] = state
+
+                effective_dist = ema.get(pose_label, candidate_dist)
+                pose_confidence = max(0.0, min(1.0, 1.0 - effective_dist))
+            else:
+                pose_label, pose_confidence, pose_source = self.pose_classifier.classify(
+                    match.body_parts,
+                    match.asana,
+                )
 
             prev_l2 = self.l2_pose_log_memory.get(track_id)
             curr_l2 = {
@@ -94,5 +144,9 @@ class SceneEngine:
         for track_id in list(self.l2_pose_log_memory.keys()):
             if track_id not in active_track_ids:
                 del self.l2_pose_log_memory[track_id]
+
+        for track_id in list(self.pose_ema_memory.keys()):
+            if track_id not in active_track_ids:
+                del self.pose_ema_memory[track_id]
 
         self.scene.timestamp = now

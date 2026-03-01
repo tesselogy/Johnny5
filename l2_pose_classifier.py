@@ -158,6 +158,17 @@ class PoseClassifier:
                 out[angle_name] = angle
         return out
 
+    def _mirror_angles(self, angles: Dict[str, float]) -> Dict[str, float]:
+        mirrored: Dict[str, float] = {}
+        for name, value in angles.items():
+            if name.startswith("left_"):
+                mirrored["right_" + name[5:]] = value
+            elif name.startswith("right_"):
+                mirrored["left_" + name[6:]] = value
+            else:
+                mirrored[name] = value
+        return mirrored
+
     def _angle_distance(self, observed: Dict[str, float], prototype: Dict[str, float]) -> float:
         common = [k for k in self.ANGLE_TRIPLETS if k in observed and k in prototype]
         if len(common) < 3:
@@ -170,25 +181,35 @@ class PoseClassifier:
             s += (diff / 180.0) ** 2
         return math.sqrt(s / len(common))
 
+    def distance_map(self, body_parts: Dict[str, Point]) -> Dict[str, float]:
+        if not self.prototypes:
+            return {}
+
+        if self._visible_points_count(body_parts) < self.min_visible_keypoints:
+            return {}
+
+        observed_angles = self._extract_angles(body_parts)
+        if not observed_angles:
+            return {}
+
+        mirrored_angles = self._mirror_angles(observed_angles)
+
+        distances: Dict[str, float] = {}
+        for label, prototype in self.prototypes.items():
+            d_normal = self._angle_distance(observed_angles, prototype)
+            d_mirror = self._angle_distance(mirrored_angles, prototype)
+            best = min(d_normal, d_mirror)
+            if math.isfinite(best):
+                distances[label] = best
+
+        return distances
+
     def classify(self, body_parts: Dict[str, Point], heuristic_asana: str) -> Tuple[str, float, str]:
-        if self._visible_points_count(body_parts) >= self.min_visible_keypoints:
-            observed_angles = self._extract_angles(body_parts)
-        else:
-            observed_angles = {}
-
-        if self.prototypes and observed_angles:
-            best_label = "unknown"
-            best_dist = float("inf")
-
-            for label, prototype in self.prototypes.items():
-                dist = self._angle_distance(observed_angles, prototype)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_label = label
-
-            if math.isfinite(best_dist):
-                confidence = max(0.0, min(1.0, 1.0 - best_dist))
-                return best_label, confidence, "prototype_angles"
+        distances = self.distance_map(body_parts)
+        if distances:
+            best_label, best_dist = min(distances.items(), key=lambda x: x[1])
+            confidence = max(0.0, min(1.0, 1.0 - best_dist))
+            return best_label, confidence, "prototype_angles_mirror"
 
         fallback = self.FALLBACK_MAP.get(heuristic_asana, "unknown")
         confidence = 0.45 if fallback != "unknown" else 0.2

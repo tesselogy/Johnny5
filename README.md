@@ -32,3 +32,6 @@ L2 now includes `PoseClassifier` (`l2_pose_classifier.py`) that classifies poses
 - Supported angle names: `left/right_elbow`, `left/right_shoulder`, `left/right_hip`, `left/right_knee`.
 - Config options: `POSE_PROTOTYPES_PATH`, `POSE_MIN_VISIBLE_KEYPOINTS` in `config.py`.
 - If prototypes are absent/insufficient, classifier falls back to heuristic `asana` labels from L1.
+
+- L2 matching uses mirror-aware comparison and EMA-smoothed distances to reduce pose jitter between near classes.
+- Extra config: `POSE_DISTANCE_EMA_ALPHA`, `POSE_SWITCH_MARGIN` in `config.py`.

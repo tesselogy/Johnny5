@@ -17,3 +17,7 @@ PG_PASSWORD = "postgres"
 # L2 pose classification
 POSE_PROTOTYPES_PATH = "pose_prototypes.json"
 POSE_MIN_VISIBLE_KEYPOINTS = 6
+
+# L2 pose smoothing
+POSE_DISTANCE_EMA_ALPHA = 0.35
+POSE_SWITCH_MARGIN = 0.06
