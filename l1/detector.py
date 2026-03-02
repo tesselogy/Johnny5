@@ -1,52 +1,26 @@
-
 from ultralytics import YOLO
 
 
 class PersonDetector:
 
-    def __init__(self, model_path="yolov8n-pose.pt"):
+    def __init__(self, model_path="runs/classify/train3/weights/best.pt", confidence_threshold=0.6):
         self.model = YOLO(model_path)
+        self.confidence_threshold = confidence_threshold
 
-        self.stream = self.model.track(
-            source=0,
-            stream=True,
-            persist=True,
-            tracker="bytetrack.yaml",
-            verbose=False
-        )
+    def run(self):
+        for result in self.model(source=0, stream=True):
+            probs = result.probs
 
-    def get_next(self):
-        result = next(self.stream)
+            if probs is None:
+                label = "uncertain"
+                confidence = 0.0
+            else:
+                top1_idx = int(probs.top1)
+                confidence = float(probs.top1conf.item())
 
-        frame = result.orig_img
-        tracks = []
+                if confidence < self.confidence_threshold:
+                    label = "uncertain"
+                else:
+                    label = self.model.names[top1_idx]
 
-        if result.boxes is None or result.boxes.id is None:
-            return frame, tracks
-
-        keypoints_xy = None
-        if result.keypoints is not None:
-            keypoints_xy = result.keypoints.xy
-
-        for i, (box, track_id, cls, conf) in enumerate(zip(
-            result.boxes.xyxy,
-            result.boxes.id,
-            result.boxes.cls,
-            result.boxes.conf
-        )):
-            if int(cls) != 0:
-                continue
-
-            x1, y1, x2, y2 = box.tolist()
-            person_keypoints = None
-            if keypoints_xy is not None and i < len(keypoints_xy):
-                person_keypoints = keypoints_xy[i].tolist()
-
-            tracks.append({
-                "track_id": f"t{int(track_id)}",
-                "bbox": (int(x1), int(y1), int(x2), int(y2)),
-                "conf": float(conf),
-                "keypoints": person_keypoints,
-            })
-
-        return frame, tracks
+            print(f"Pose: {label} | Confidence: {confidence:.2f}")
