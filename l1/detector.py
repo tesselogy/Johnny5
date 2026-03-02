@@ -4,14 +4,14 @@ from ultralytics import YOLO
 
 class PersonDetector:
 
-    def __init__(self, model_path="yolov8n.pt"):
+    def __init__(self, model_path="yolov8s-pose.pt", tracker="botsort.yaml"):
         self.model = YOLO(model_path)
 
         self.stream = self.model.track(
             source=0,
             stream=True,
             persist=True,
-            tracker="bytetrack.yaml",
+            tracker=tracker,
             verbose=False
         )
 
