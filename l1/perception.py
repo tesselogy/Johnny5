@@ -68,8 +68,6 @@ class Perception:
         # person_id -> timestamp of last profile vector append
         self.profile_update_ts = {}
 
-        # track_id -> last emitted debug posture state
-        self.debug_state_memory = {}
 
         # load stored embeddings
         existing = self.store.load_all()
@@ -81,38 +79,6 @@ class Perception:
         )
 
         print(f"[IdentityStore] Loaded {len(existing)} persons")
-
-    def _log_state_changes(self, track_id, person_id, person_position, pose_state, eyes_state, asana):
-        prev = self.debug_state_memory.get(track_id)
-        current = {
-            "position": person_position,
-            "pose": pose_state,
-            "eyes": eyes_state,
-            "asana": asana,
-        }
-
-        if prev is None:
-            self.debug_state_memory[track_id] = current
-            print(
-                f"[PoseDebugL1:init] track={track_id} person={person_id} "
-                f"position={person_position} pose={pose_state} eyes={eyes_state} asana_l1={asana}"
-            )
-            return
-
-        changed = []
-        for key in ("position", "pose", "eyes", "asana"):
-            if prev.get(key) != current[key]:
-                field_name = "asana_l1" if key == "asana" else key
-                changed.append(f"{field_name}:{prev.get(key)}->{current[key]}")
-
-        if changed:
-            print(
-                f"[PoseDebugL1:change] track={track_id} person={person_id} "
-                + " | ".join(changed)
-            )
-
-        self.debug_state_memory[track_id] = current
-
 
     def _estimate_person_position(self, frame_shape, bbox):
         h, w = frame_shape[:2]
@@ -298,15 +264,6 @@ class Perception:
             pose_state, asana = self._classify_pose_and_asana(body_parts)
             eyes_state = self._classify_eyes(frame, (x1, y1, x2, y2), body_parts)
 
-            self._log_state_changes(
-                track_id,
-                self.identity_memory.get(track_id),
-                person_position,
-                pose_state,
-                eyes_state,
-                asana,
-            )
-
             embedding, quality = self.encoder.extract(
                 frame,
                 (x1, y1, x2, y2)
@@ -466,10 +423,6 @@ class Perception:
             if track_id not in active_track_ids:
                 if now - self.track_state[track_id]["last_seen"] > TRACK_STALE_SEC:
                     del self.track_state[track_id]
-
-        for track_id in list(self.debug_state_memory.keys()):
-            if track_id not in active_track_ids:
-                del self.debug_state_memory[track_id]
 
         cv2.imshow("Johnny5 Vision", frame)
         cv2.waitKey(1)
