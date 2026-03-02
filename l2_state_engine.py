@@ -7,6 +7,8 @@ from config import (
     POSE_PROTOTYPES_PATH,
     POSE_DISTANCE_EMA_ALPHA,
     POSE_SWITCH_MARGIN,
+    POSE_MLP_MODEL_PATH,
+    POSE_MLP_LABELS_PATH,
 )
 from l2_pose_classifier import PoseClassifier
 
@@ -18,6 +20,8 @@ class SceneEngine:
         self.pose_classifier = PoseClassifier(
             prototypes_path=POSE_PROTOTYPES_PATH,
             min_visible_keypoints=POSE_MIN_VISIBLE_KEYPOINTS,
+            mlp_model_path=POSE_MLP_MODEL_PATH,
+            mlp_labels_path=POSE_MLP_LABELS_PATH,
         )
         self.l2_pose_log_memory = {}
         self.pose_ema_memory = {}
@@ -36,53 +40,53 @@ class SceneEngine:
 
             active_keys.add(person_key)
 
-            distances = self.pose_classifier.distance_map(match.body_parts)
+            pose_label, pose_confidence, pose_source = self.pose_classifier.classify(
+                match.body_parts,
+                match.asana,
+            )
 
-            pose_label = "unknown"
-            pose_confidence = 0.0
-            pose_source = "prototype_angles_mirror_ema"
+            # For prototype-distance mode keep temporal EMA/hysteresis smoothing.
+            if pose_source == "prototype_angles_mirror":
+                distances = self.pose_classifier.distance_map(match.body_parts)
+                if distances:
+                    state = self.pose_ema_memory.get(track_id, {"ema": {}, "label": pose_label})
+                    ema = state["ema"]
 
-            if distances:
-                state = self.pose_ema_memory.get(track_id, {"ema": {}, "label": None})
-                ema = state["ema"]
+                    for label, dist in distances.items():
+                        if label in ema:
+                            ema[label] = (
+                                POSE_DISTANCE_EMA_ALPHA * dist
+                                + (1.0 - POSE_DISTANCE_EMA_ALPHA) * ema[label]
+                            )
+                        else:
+                            ema[label] = dist
 
-                # update EMA for seen labels
-                for label, dist in distances.items():
-                    if label in ema:
-                        ema[label] = (
-                            POSE_DISTANCE_EMA_ALPHA * dist
-                            + (1.0 - POSE_DISTANCE_EMA_ALPHA) * ema[label]
-                        )
-                    else:
-                        ema[label] = dist
+                    for label in list(ema.keys()):
+                        if label not in distances:
+                            ema[label] = min(1.0, ema[label] + 0.03)
 
-                # soft decay for labels not seen in current frame
-                for label in list(ema.keys()):
-                    if label not in distances:
-                        ema[label] = min(1.0, ema[label] + 0.03)
+                    candidate_label, candidate_dist = min(ema.items(), key=lambda x: x[1])
+                    prev_label = state.get("label")
 
-                candidate_label, candidate_dist = min(ema.items(), key=lambda x: x[1])
-                prev_label = state.get("label")
-
-                if prev_label in ema:
-                    prev_dist = ema[prev_label]
-                    if candidate_label != prev_label and candidate_dist > prev_dist - POSE_SWITCH_MARGIN:
-                        pose_label = prev_label
+                    if prev_label in ema:
+                        prev_dist = ema[prev_label]
+                        if candidate_label != prev_label and candidate_dist > prev_dist - POSE_SWITCH_MARGIN:
+                            pose_label = prev_label
+                        else:
+                            pose_label = candidate_label
                     else:
                         pose_label = candidate_label
-                else:
-                    pose_label = candidate_label
 
-                state["label"] = pose_label
-                self.pose_ema_memory[track_id] = state
+                    state["label"] = pose_label
+                    self.pose_ema_memory[track_id] = state
 
-                effective_dist = ema.get(pose_label, candidate_dist)
-                pose_confidence = max(0.0, min(1.0, 1.0 - effective_dist))
+                    effective_dist = ema.get(pose_label, candidate_dist)
+                    pose_confidence = max(0.0, min(1.0, 1.0 - effective_dist))
+                    pose_source = "prototype_angles_mirror_ema"
             else:
-                pose_label, pose_confidence, pose_source = self.pose_classifier.classify(
-                    match.body_parts,
-                    match.asana,
-                )
+                # MLP/heuristic path: clear stale EMA for this track to avoid mixed modes.
+                if track_id in self.pose_ema_memory:
+                    del self.pose_ema_memory[track_id]
 
             prev_l2 = self.l2_pose_log_memory.get(track_id)
             curr_l2 = {

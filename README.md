@@ -35,3 +35,7 @@ L2 now includes `PoseClassifier` (`l2_pose_classifier.py`) that classifies poses
 
 - L2 matching uses mirror-aware comparison and EMA-smoothed distances to reduce pose jitter between near classes.
 - Extra config: `POSE_DISTANCE_EMA_ALPHA`, `POSE_SWITCH_MARGIN` in `config.py`.
+
+
+- Optional: set `pose_mlp.pt` in repo root to enable direct MLP classification from 17 keypoints `(x,y)` (34-dim input).
+- Optional class names file: `pose_labels.json` as `{"labels": ["class_a", "class_b", ...]}` or plain array.

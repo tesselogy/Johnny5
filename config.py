@@ -21,3 +21,7 @@ POSE_MIN_VISIBLE_KEYPOINTS = 6
 # L2 pose smoothing
 POSE_DISTANCE_EMA_ALPHA = 0.35
 POSE_SWITCH_MARGIN = 0.06
+
+# L2 MLP pose classifier
+POSE_MLP_MODEL_PATH = "pose_mlp.pt"
+POSE_MLP_LABELS_PATH = "pose_labels.json"

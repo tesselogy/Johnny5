@@ -1,7 +1,7 @@
 import json
 import math
 import os
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 Point = Optional[Tuple[int, int]]
@@ -9,36 +9,13 @@ Point = Optional[Tuple[int, int]]
 
 class PoseClassifier:
     """
-    L2 yoga pose classifier with two modes:
-    1) Prototype mode: nearest angle-prototype loaded from JSON (recommended for Roboflow dataset).
-    2) Fallback mode: map L1 heuristic asana labels.
-
-    Expected JSON format:
-    {
-      "tree_pose": {
-        "left_elbow": 168.5,
-        "right_elbow": 172.0,
-        "left_knee": 48.2,
-        "right_knee": 177.1
-      },
-      "warrior_2": {...}
-    }
-
-    Angles are in degrees [0..180].
+    L2 yoga pose classifier with three levels:
+    1) MLP model (`pose_mlp.pt`) on 17 normalized keypoints (x, y).
+    2) Prototype angle matcher (mirror-aware).
+    3) L1 heuristic fallback map.
     """
 
-    ANGLE_TRIPLETS = {
-        "left_elbow": ("left_shoulder", "left_elbow", "left_wrist"),
-        "right_elbow": ("right_shoulder", "right_elbow", "right_wrist"),
-        "left_shoulder": ("left_elbow", "left_shoulder", "left_hip"),
-        "right_shoulder": ("right_elbow", "right_shoulder", "right_hip"),
-        "left_hip": ("left_shoulder", "left_hip", "left_knee"),
-        "right_hip": ("right_shoulder", "right_hip", "right_knee"),
-        "left_knee": ("left_hip", "left_knee", "left_ankle"),
-        "right_knee": ("right_hip", "right_knee", "right_ankle"),
-    }
-
-    KEYPOINT_NAMES = {
+    KEYPOINT_ORDER = [
         "nose",
         "left_eye",
         "right_eye",
@@ -56,6 +33,17 @@ class PoseClassifier:
         "right_knee",
         "left_ankle",
         "right_ankle",
+    ]
+
+    ANGLE_TRIPLETS = {
+        "left_elbow": ("left_shoulder", "left_elbow", "left_wrist"),
+        "right_elbow": ("right_shoulder", "right_elbow", "right_wrist"),
+        "left_shoulder": ("left_elbow", "left_shoulder", "left_hip"),
+        "right_shoulder": ("right_elbow", "right_shoulder", "right_hip"),
+        "left_hip": ("left_shoulder", "left_hip", "left_knee"),
+        "right_hip": ("right_shoulder", "right_hip", "right_knee"),
+        "left_knee": ("left_hip", "left_knee", "left_ankle"),
+        "right_knee": ("right_hip", "right_knee", "right_ankle"),
     }
 
     FALLBACK_MAP = {
@@ -66,10 +54,65 @@ class PoseClassifier:
         "unknown": "unknown",
     }
 
-    def __init__(self, prototypes_path: str = "pose_prototypes.json", min_visible_keypoints: int = 6):
+    def __init__(
+        self,
+        prototypes_path: str = "pose_prototypes.json",
+        min_visible_keypoints: int = 6,
+        mlp_model_path: str = "pose_mlp.pt",
+        mlp_labels_path: str = "pose_labels.json",
+    ):
         self.prototypes_path = prototypes_path
         self.min_visible_keypoints = min_visible_keypoints
         self.prototypes = self._load_prototypes(prototypes_path)
+
+        self.mlp_model_path = mlp_model_path
+        self.mlp_labels = self._load_mlp_labels(mlp_labels_path)
+        self.mlp_model = None
+        self.mlp_backend = None
+        self._load_mlp_model(mlp_model_path)
+
+    def _load_mlp_labels(self, path: str) -> List[str]:
+        if not path or not os.path.exists(path):
+            return []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return [str(v) for v in data]
+            if isinstance(data, dict) and "labels" in data and isinstance(data["labels"], list):
+                return [str(v) for v in data["labels"]]
+        except Exception:
+            return []
+        return []
+
+    def _load_mlp_model(self, model_path: str) -> None:
+        if not model_path or not os.path.exists(model_path):
+            return
+
+        try:
+            import torch
+        except Exception:
+            return
+
+        # Prefer TorchScript for portability
+        try:
+            model = torch.jit.load(model_path, map_location="cpu")
+            model.eval()
+            self.mlp_model = model
+            self.mlp_backend = "torchscript"
+            return
+        except Exception:
+            pass
+
+        try:
+            model = torch.load(model_path, map_location="cpu")
+            if hasattr(model, "eval"):
+                model.eval()
+            self.mlp_model = model
+            self.mlp_backend = "torch"
+        except Exception:
+            self.mlp_model = None
+            self.mlp_backend = None
 
     def _load_prototypes(self, path: str) -> Dict[str, Dict[str, float]]:
         if not path or not os.path.exists(path):
@@ -88,44 +131,82 @@ class PoseClassifier:
         if not isinstance(prototype_data, dict):
             return {}
 
-        # Format A (new): {"left_knee": 92.0, ...}
-        angle_like = all(
-            (k in self.ANGLE_TRIPLETS) or (k in self.KEYPOINT_NAMES)
-            for k in prototype_data.keys()
-        )
-
         parsed_angles: Dict[str, float] = {}
         for angle_name in self.ANGLE_TRIPLETS:
             value = prototype_data.get(angle_name)
             if isinstance(value, (int, float)):
                 parsed_angles[angle_name] = float(value)
 
-        # If we already have explicit angles, use them directly.
         if parsed_angles:
             return parsed_angles
 
-        # Format B (legacy): {"left_shoulder": [x,y], ...}
-        # Convert coordinate prototype to angle prototype for backward compatibility.
-        if angle_like:
-            keypoint_map: Dict[str, Point] = {}
-            for name in self.KEYPOINT_NAMES:
-                point = prototype_data.get(name)
-                if (
-                    isinstance(point, (list, tuple))
-                    and len(point) >= 2
-                    and isinstance(point[0], (int, float))
-                    and isinstance(point[1], (int, float))
-                ):
-                    keypoint_map[name] = (int(point[0] * 1000), int(point[1] * 1000))
-                else:
-                    keypoint_map[name] = None
+        keypoint_map: Dict[str, Point] = {}
+        for name in self.KEYPOINT_ORDER:
+            point = prototype_data.get(name)
+            if (
+                isinstance(point, (list, tuple))
+                and len(point) >= 2
+                and isinstance(point[0], (int, float))
+                and isinstance(point[1], (int, float))
+            ):
+                keypoint_map[name] = (int(point[0] * 1000), int(point[1] * 1000))
+            else:
+                keypoint_map[name] = None
 
-            return self._extract_angles(keypoint_map)
-
-        return {}
+        return self._extract_angles(keypoint_map)
 
     def _visible_points_count(self, body_parts: Dict[str, Point]) -> int:
         return sum(1 for p in body_parts.values() if p is not None)
+
+    def _normalize_keypoints_xy(self, body_parts: Dict[str, Point]) -> Optional[List[float]]:
+        points = [body_parts.get(k) for k in self.KEYPOINT_ORDER]
+        visible = [p for p in points if p is not None]
+        if len(visible) < self.min_visible_keypoints:
+            return None
+
+        xs = [p[0] for p in visible]
+        ys = [p[1] for p in visible]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        w = max(1.0, float(max_x - min_x))
+        h = max(1.0, float(max_y - min_y))
+
+        out: List[float] = []
+        for p in points:
+            if p is None:
+                out.extend([0.0, 0.0])
+            else:
+                out.extend([(p[0] - min_x) / w, (p[1] - min_y) / h])
+        return out
+
+    def _classify_mlp(self, body_parts: Dict[str, Point]) -> Optional[Tuple[str, float, str]]:
+        if self.mlp_model is None:
+            return None
+
+        features = self._normalize_keypoints_xy(body_parts)
+        if features is None:
+            return None
+
+        try:
+            import torch
+            x = torch.tensor([features], dtype=torch.float32)
+            with torch.no_grad():
+                logits = self.mlp_model(x)
+                if isinstance(logits, (list, tuple)):
+                    logits = logits[0]
+                probs = torch.softmax(logits, dim=-1)
+                conf, idx = torch.max(probs, dim=-1)
+                idx_val = int(idx.item())
+                conf_val = float(conf.item())
+
+            if self.mlp_labels and 0 <= idx_val < len(self.mlp_labels):
+                label = self.mlp_labels[idx_val]
+            else:
+                label = f"class_{idx_val}"
+
+            return label, conf_val, "mlp_17xy"
+        except Exception:
+            return None
 
     def _joint_angle(self, a: Point, b: Point, c: Point) -> Optional[float]:
         if a is None or b is None or c is None:
@@ -205,6 +286,10 @@ class PoseClassifier:
         return distances
 
     def classify(self, body_parts: Dict[str, Point], heuristic_asana: str) -> Tuple[str, float, str]:
+        mlp_result = self._classify_mlp(body_parts)
+        if mlp_result is not None:
+            return mlp_result
+
         distances = self.distance_map(body_parts)
         if distances:
             best_label, best_dist = min(distances.items(), key=lambda x: x[1])
