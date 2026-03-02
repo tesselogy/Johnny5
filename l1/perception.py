@@ -26,6 +26,27 @@ PROFILE_UPDATE_THRESHOLD = 0.82
 PROFILE_UPDATE_INTERVAL_SEC = 8.0
 
 
+COCO_KEYPOINTS = {
+    0: "nose",
+    1: "left_eye",
+    2: "right_eye",
+    3: "left_ear",
+    4: "right_ear",
+    5: "left_shoulder",
+    6: "right_shoulder",
+    7: "left_elbow",
+    8: "right_elbow",
+    9: "left_wrist",
+    10: "right_wrist",
+    11: "left_hip",
+    12: "right_hip",
+    13: "left_knee",
+    14: "right_knee",
+    15: "left_ankle",
+    16: "right_ankle",
+}
+
+
 class Perception:
 
     def __init__(self):
@@ -47,17 +68,130 @@ class Perception:
         # person_id -> timestamp of last profile vector append
         self.profile_update_ts = {}
 
+
         # load stored embeddings
         existing = self.store.load_all()
         for person_id, embedding in existing:
             self.index.add_embedding(person_id, embedding)
 
+        self.eye_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_eye_tree_eyeglasses.xml"
+        )
+
         print(f"[IdentityStore] Loaded {len(existing)} persons")
+
+    def _estimate_person_position(self, frame_shape, bbox):
+        h, w = frame_shape[:2]
+        x1, y1, x2, y2 = bbox
+
+        cx = (x1 + x2) / 2.0
+        box_h = max(1.0, y2 - y1)
+        ratio = box_h / max(1.0, h)
+
+        horizontal = "center"
+        if cx < w * 0.33:
+            horizontal = "left"
+        elif cx > w * 0.67:
+            horizontal = "right"
+
+        depth = "middle"
+        if ratio >= 0.55:
+            depth = "close"
+        elif ratio <= 0.28:
+            depth = "far"
+
+        return f"{depth}_{horizontal}"
+
+    def _keypoints_dict(self, keypoints):
+        mapped = {}
+
+        if not keypoints:
+            for _, name in COCO_KEYPOINTS.items():
+                mapped[name] = None
+            return mapped
+
+        for idx, name in COCO_KEYPOINTS.items():
+            if idx < len(keypoints):
+                x, y = keypoints[idx][:2]
+                if x > 0 and y > 0:
+                    mapped[name] = (int(x), int(y))
+                else:
+                    mapped[name] = None
+            else:
+                mapped[name] = None
+
+        return mapped
+
+    def _classify_pose_and_asana(self, body_parts):
+        left_hip = body_parts.get("left_hip")
+        right_hip = body_parts.get("right_hip")
+        left_knee = body_parts.get("left_knee")
+        right_knee = body_parts.get("right_knee")
+        left_ankle = body_parts.get("left_ankle")
+        right_ankle = body_parts.get("right_ankle")
+        left_wrist = body_parts.get("left_wrist")
+        right_wrist = body_parts.get("right_wrist")
+        left_shoulder = body_parts.get("left_shoulder")
+        right_shoulder = body_parts.get("right_shoulder")
+
+        pose_state = "not_visible"
+        asana = "unknown"
+
+        lower_points = [left_hip, right_hip, left_knee, right_knee]
+        if any(p is not None for p in lower_points):
+            pose_state = "standing"
+
+        if all(p is not None for p in [left_hip, right_hip, left_knee, right_knee]):
+            hip_y = (left_hip[1] + right_hip[1]) / 2.0
+            knee_y = (left_knee[1] + right_knee[1]) / 2.0
+            if abs(knee_y - hip_y) < 45:
+                pose_state = "sitting"
+
+        if all(p is not None for p in [left_ankle, right_ankle, left_hip, right_hip]):
+            hip_y = (left_hip[1] + right_hip[1]) / 2.0
+            ankle_y = (left_ankle[1] + right_ankle[1]) / 2.0
+            if ankle_y - hip_y > 120:
+                asana = "mountain"
+
+        if all(p is not None for p in [left_wrist, right_wrist, left_shoulder, right_shoulder]):
+            if left_wrist[1] < left_shoulder[1] and right_wrist[1] < right_shoulder[1]:
+                asana = "raised_hands"
+            elif abs(left_wrist[1] - left_shoulder[1]) < 45 and abs(right_wrist[1] - right_shoulder[1]) < 45:
+                asana = "t_pose"
+
+        if pose_state == "sitting" and asana == "unknown":
+            asana = "seated"
+
+        return pose_state, asana
+
+    def _classify_eyes(self, frame, bbox, body_parts):
+        left_eye = body_parts.get("left_eye")
+        right_eye = body_parts.get("right_eye")
+
+        if left_eye is None and right_eye is None:
+            return "not_visible"
+
+        x1, y1, x2, y2 = bbox
+        head_h = max(1, int((y2 - y1) * 0.38))
+        face_roi = frame[max(0, y1):max(0, y1) + head_h, max(0, x1):max(0, x2)]
+
+        if face_roi.size == 0:
+            return "not_visible"
+
+        gray = cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)
+        eyes = self.eye_cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=4,
+            minSize=(10, 10)
+        )
+
+        return "open" if len(eyes) >= 1 else "closed_or_not_detected"
 
     # -------------------------------------------------
     # Debug overlay
     # -------------------------------------------------
-    def draw_overlay(self, frame, track_id, bbox, similarity, person_id):
+    def draw_overlay(self, frame, track_id, bbox, similarity, person_id, person_position, pose_state, eyes_state, asana):
 
         x1, y1, x2, y2 = bbox
 
@@ -68,14 +202,44 @@ class Perception:
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-        label = f"{track_id} | {person_id} | {similarity:.2f}"
+        label = f"{track_id} | {person_id} | sim:{similarity:.2f}"
+        debug_line = f"{person_position} | pose:{pose_state} | eyes:{eyes_state} | asana:{asana}"
+
+        text_size_1, _ = cv2.getTextSize(
+            label,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            2,
+        )
+        text_size_2, _ = cv2.getTextSize(
+            debug_line,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            2,
+        )
+
+        bg_width = max(text_size_1[0], text_size_2[0]) + 12
+        bg_height = text_size_1[1] + text_size_2[1] + 18
+        bg_tl = (x1, max(0, y1 - bg_height - 4))
+        bg_br = (x1 + bg_width, max(0, y1 - 4))
+        cv2.rectangle(frame, bg_tl, bg_br, (0, 0, 0), -1)
 
         cv2.putText(
             frame,
             label,
-            (x1, y1 - 10),
+            (x1 + 6, max(20, y1 - 28)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
+            0.6,
+            color,
+            2
+        )
+
+        cv2.putText(
+            frame,
+            debug_line,
+            (x1 + 6, max(42, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
             color,
             2
         )
@@ -89,7 +253,16 @@ class Perception:
         identity_results = []
         now = time.time()
 
-        for track_id, x1, y1, x2, y2, conf in tracks:
+        for track in tracks:
+
+            track_id = track["track_id"]
+            x1, y1, x2, y2 = track["bbox"]
+            keypoints = track.get("keypoints")
+
+            body_parts = self._keypoints_dict(keypoints)
+            person_position = self._estimate_person_position(frame.shape, (x1, y1, x2, y2))
+            pose_state, asana = self._classify_pose_and_asana(body_parts)
+            eyes_state = self._classify_eyes(frame, (x1, y1, x2, y2), body_parts)
 
             embedding, quality = self.encoder.extract(
                 frame,
@@ -98,7 +271,7 @@ class Perception:
 
             if embedding is None:
                 identity_results.append(
-                    (track_id, IdentityMatch(None, 0.0))
+                    (track_id, IdentityMatch(None, 0.0, person_position, pose_state, eyes_state, asana, body_parts))
                 )
                 continue
 
@@ -223,7 +396,7 @@ class Perception:
                     self.profile_update_ts[person_id] = now
 
             identity_results.append(
-                (track_id, IdentityMatch(person_id, similarity))
+                (track_id, IdentityMatch(person_id, similarity, person_position, pose_state, eyes_state, asana, body_parts))
             )
 
             self.draw_overlay(
@@ -231,10 +404,14 @@ class Perception:
                 track_id,
                 (x1, y1, x2, y2),
                 similarity,
-                person_id
+                person_id,
+                person_position,
+                pose_state,
+                eyes_state,
+                asana
             )
 
-        active_track_ids = {track_id for track_id, *_ in tracks}
+        active_track_ids = {track["track_id"] for track in tracks}
 
         for track_id in list(self.identity_memory.keys()):
             if track_id not in active_track_ids:

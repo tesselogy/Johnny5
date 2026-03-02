@@ -1,44 +1,26 @@
-
 from ultralytics import YOLO
 
 
 class PersonDetector:
 
-    def __init__(self, model_path="yolov8n.pt"):
+    def __init__(self, model_path="l1/best.pt", confidence_threshold=0.6):
         self.model = YOLO(model_path)
+        self.confidence_threshold = confidence_threshold
 
-        self.stream = self.model.track(
-            source=0,
-            stream=True,
-            persist=True,
-            tracker="bytetrack.yaml",
-            verbose=False
-        )
+    def run(self):
+        for result in self.model(source=0, stream=True):
+            probs = result.probs
 
-    def get_next(self):
-        result = next(self.stream)
+            if probs is None:
+                label = "uncertain"
+                confidence = 0.0
+            else:
+                top1_idx = int(probs.top1)
+                confidence = float(probs.top1conf.item())
 
-        frame = result.orig_img
-        tracks = []
+                if confidence < self.confidence_threshold:
+                    label = "uncertain"
+                else:
+                    label = self.model.names[top1_idx]
 
-        if result.boxes is None or result.boxes.id is None:
-            return frame, tracks
-
-        for box, track_id, cls, conf in zip(
-            result.boxes.xyxy,
-            result.boxes.id,
-            result.boxes.cls,
-            result.boxes.conf
-        ):
-            if int(cls) != 0:
-                continue
-
-            x1, y1, x2, y2 = box.tolist()
-
-            tracks.append((
-                f"t{int(track_id)}",
-                int(x1), int(y1), int(x2), int(y2),
-                float(conf)
-            ))
-
-        return frame, tracks
+            print(f"Pose: {label} | Confidence: {confidence:.2f}")

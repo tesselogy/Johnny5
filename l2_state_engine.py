@@ -1,7 +1,7 @@
 
 import time
 from models import ParticipantState, SceneState
-from config import RECOGNITION_THRESHOLD, LOW_THRESHOLD, GRACE_PERIOD_SEC
+from config import GRACE_PERIOD_SEC
 
 
 class SceneEngine:
@@ -29,12 +29,22 @@ class SceneEngine:
                     person_id=match.person_id,
                     current_track_id=track_id,
                     identity_status="RECOGNIZED" if match.similarity >= 0.75 else "UNRECOGNIZED",
-                    last_seen=now
+                    last_seen=now,
+                    person_position=match.person_position,
+                    pose_state=match.pose_state,
+                    eyes_state=match.eyes_state,
+                    asana=match.asana,
+                    body_parts=match.body_parts,
                 )
             else:
                 p = self.scene.participants[person_key]
                 p.current_track_id = track_id
                 p.last_seen = now
+                p.person_position = match.person_position
+                p.pose_state = match.pose_state
+                p.eyes_state = match.eyes_state
+                p.asana = match.asana
+                p.body_parts = match.body_parts
 
         for key, participant in list(self.scene.participants.items()):
             if key not in active_keys:
